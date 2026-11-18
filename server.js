@@ -193,19 +193,21 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-function serveFile(res, filePath, contentType, cache) {
+function serveFile(res, filePath, contentType, cache, extraHeaders = {}) {
   fs.readFile(filePath, (err, data) => {
     if (err) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Not found');
       return;
     }
-    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cache });
+    res.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': cache, ...extraHeaders });
     res.end(data);
   });
 }
 
-function serveAsset(res, pathname) {
+// Assets are revalidated on every load (ETag), so a new deploy is picked up immediately
+// instead of leaving browsers with an old script that no longer matches the server.
+function serveAsset(req, res, pathname) {
   const rel = decodeURIComponent(pathname.replace(/^\/assets\//, ''));
   const full = path.normalize(path.join(ASSETS_DIR, rel));
   if (!full.startsWith(ASSETS_DIR + path.sep)) {
@@ -213,7 +215,20 @@ function serveAsset(res, pathname) {
     res.end('Forbidden');
     return;
   }
-  serveFile(res, full, MIME[path.extname(full)] || 'application/octet-stream', 'public, max-age=300');
+  fs.stat(full, (err, st) => {
+    if (err || !st.isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Not found');
+      return;
+    }
+    const etag = `W/"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' });
+      res.end();
+      return;
+    }
+    serveFile(res, full, MIME[path.extname(full)] || 'application/octet-stream', 'no-cache', { ETag: etag });
+  });
 }
 
 // ---------- Model call ----------
@@ -485,7 +500,7 @@ const server = http.createServer(async (req, res) => {
       return res.end('ok');
     }
 
-    if (pathname.startsWith('/assets/') && method === 'GET') return serveAsset(res, pathname);
+    if (pathname.startsWith('/assets/') && method === 'GET') return serveAsset(req, res, pathname);
 
     if (pathname === '/login' && method === 'GET') {
       if (isAuthed(req)) return redirect(res, '/');
