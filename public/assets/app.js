@@ -207,7 +207,13 @@ runBtn.addEventListener('click', async () => {
     const started = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(started.error || 'The review could not start. Try again.');
 
-    const data = await pollJob(started.jobId);
+    let data;
+    if (started.review) data = started; // a server that answers directly
+    else if (started.jobId) data = await pollJob(started.jobId);
+    else throw new Error('The server sent an unexpected response. Refresh the page (Ctrl+Shift+R) and try again.');
+    if (!data || !data.review || !Array.isArray(data.review.findings)) {
+      throw new Error('The review came back incomplete. Refresh the page (Ctrl+Shift+R) and try again.');
+    }
     lastReview = data;
     render(data);
     setStatus('');
