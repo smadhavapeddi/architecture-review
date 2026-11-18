@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Architecture reviewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="bar-inner">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="3" fill="none" stroke="#0069ff" stroke-width="1.8" stroke-dasharray="3.2 2.6"/><circle cx="12" cy="12" r="4.2" fill="#0f2540"/></svg>
+      <span>Architecture reviewer</span>
+    </div>
+    <div class="bar-right">
+      <span class="model-note" id="modelNote"></span>
+      <button class="link-btn" id="signOut" type="button">Sign out</button>
+    </div>
+  </div>
+</header>
+
+<main class="bench">
+  <section class="pane input-pane" aria-labelledby="inputTitle">
+    <h1 id="inputTitle">Review an architecture</h1>
+    <p class="lede">Upload a diagram or describe the setup. You get single points of failure, ranked, with the DigitalOcean building blocks that fix them.</p>
+
+    <div class="drop" id="drop" tabindex="0" role="button" aria-label="Upload a diagram. You can also drop or paste an image.">
+      <strong>Upload a diagram</strong>
+      <span>Choose a file, drop it here, or paste a screenshot. PNG, JPEG, WebP, or GIF.</span>
+    </div>
+    <input type="file" id="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+
+    <div class="preview" id="preview" hidden>
+      <img id="previewImg" alt="Your uploaded architecture diagram">
+      <div class="preview-row">
+        <span id="previewName"></span>
+        <button class="link-btn" id="removeImg" type="button">Remove</button>
+      </div>
+    </div>
+
+    <label class="field-label" for="desc">Describe the setup <span class="hint">(optional if you upload a diagram)</span></label>
+    <textarea id="desc" maxlength="8000" placeholder="For example: two web Droplets behind one load balancer, PostgreSQL on its own Droplet, nightly backups to Spaces."></textarea>
+
+    <div class="examples" id="examples">
+      <span>Start from an example:</span>
+      <button class="chip-btn" type="button" data-example="wordpress">Single Droplet site</button>
+      <button class="chip-btn" type="button" data-example="services">Services on Droplets</button>
+      <button class="chip-btn" type="button" data-example="doks">Kubernetes and database</button>
+    </div>
+
+    <button class="primary" id="run" type="button">Review architecture</button>
+    <p class="status" id="status" role="status"></p>
+  </section>
+
+  <section class="pane output-pane" id="out" aria-live="polite" aria-label="Review results">
+    <div class="empty">
+      <h2>Your review appears here</h2>
+      <p>Pick an example on the left to see what a review looks like, or add your own diagram or description.</p>
+      <div class="ghost" aria-hidden="true"><i></i><i></i><i></i></div>
+    </div>
+  </section>
+</main>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

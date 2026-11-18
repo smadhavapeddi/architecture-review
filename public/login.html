@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Sign in | Architecture reviewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Schibsted+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<main class="login-wrap">
+  <form class="login-box" id="form" autocomplete="on" novalidate>
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><rect x="1.5" y="1.5" width="21" height="21" rx="3" fill="none" stroke="#0069ff" stroke-width="1.8" stroke-dasharray="3.2 2.6"/><circle cx="12" cy="12" r="4.2" fill="#0f2540"/></svg>
+      <span>Architecture reviewer</span>
+    </div>
+    <h1>Sign in</h1>
+    <p class="lede">Use the user ID and password you were given.</p>
+
+    <label class="field-label" for="username">User ID</label>
+    <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+
+    <label class="field-label" for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+    <button class="primary" id="submit" type="submit">Sign in</button>
+    <p class="status" id="status" role="alert"></p>
+  </form>
+</main>
+<script src="/assets/login.js"></script>
+</body>
+</html>
