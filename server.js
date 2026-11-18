@@ -219,7 +219,7 @@ function serveAsset(res, pathname) {
 // ---------- Model call ----------
 async function callInference(payload) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 150 * 1000);
+  const timer = setTimeout(() => ctrl.abort(), 280 * 1000);
   try {
     const r = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -250,6 +250,145 @@ function messageText(json) {
   return '';
 }
 
+// ---------- Model availability check (cached) ----------
+let modelCache = { at: 0, ids: null };
+
+function stateFromIds(ids) {
+  if (!ids || !ids.length) return { state: 'unknown' };
+  if (ids.includes(MODEL)) return { state: 'ok' };
+  const hints = ids.filter((id) => /glm|kimi|vl|qwen|gemma|llama|deepseek/i.test(id)).slice(0, 8);
+  return { state: 'missing', hints };
+}
+
+async function checkModel() {
+  if (!MODEL_ACCESS_KEY) return { state: 'nokey' };
+  if (modelCache.ids && Date.now() - modelCache.at < 10 * 60 * 1000) return stateFromIds(modelCache.ids);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch(`${BASE_URL}/models`, { headers: { Authorization: `Bearer ${MODEL_ACCESS_KEY}` }, signal: ctrl.signal });
+    if (r.status === 401 || r.status === 403) return { state: 'badkey' };
+    if (!r.ok) return { state: 'unknown' };
+    const j = await r.json();
+    const ids = (Array.isArray(j.data) ? j.data : []).map((m) => m && m.id).filter(Boolean);
+    modelCache = { at: Date.now(), ids };
+    return stateFromIds(ids);
+  } catch (_) {
+    return { state: 'unknown' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ---------- Review jobs ----------
+// Reviews can take a minute or more. Running them as background jobs that the browser polls
+// keeps every HTTP request short, so gateway timeouts cannot cut a review off.
+const jobs = new Map();
+const MAX_RUNNING_JOBS = 3;
+const runningJobs = () => [...jobs.values()].filter((j) => j.status === 'running').length;
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, j] of jobs) if (now - j.createdAt > 20 * 60 * 1000) jobs.delete(id);
+}, 60 * 1000).unref();
+
+function upstreamDetail(result) {
+  const j = result.json;
+  let m = j && (j.error && (j.error.message || j.error)) || (j && j.message) || result.raw || '';
+  if (typeof m !== 'string') m = JSON.stringify(m);
+  return m.replace(/\s+/g, ' ').trim().slice(0, 220);
+}
+
+const fail = (status, error, detail) => ({ ok: false, status, error, detail: detail || '' });
+
+async function performReview({ description, image }) {
+  const userText = description
+    ? `Customer's description of the setup:\n${description}${image ? '\n\nA diagram is attached. Use it together with the description.' : ''}`
+    : 'No written description was provided. Base the review on the attached diagram.';
+
+  const userContent = image
+    ? [
+        { type: 'text', text: userText },
+        { type: 'image_url', image_url: { url: image } },
+      ]
+    : userText;
+
+  const base = {
+    model: MODEL,
+    temperature: 0.2,
+    max_tokens: 9000,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: userContent },
+    ],
+  };
+
+  const started = Date.now();
+  try {
+    // First try strict structured output. Some models reject it, so fall back to prompt-only JSON.
+    let result = await callInference({
+      ...base,
+      response_format: { type: 'json_schema', json_schema: { name: 'architecture_review', strict: true, schema: REVIEW_SCHEMA } },
+    });
+    let structured = true;
+    if (result.status === 400 || result.status === 422) {
+      structured = false;
+      result = await callInference(base);
+    }
+
+    const choice = result.json && result.json.choices && result.json.choices[0];
+    const finish = choice && choice.finish_reason;
+    const usage = result.json && result.json.usage && result.json.usage.total_tokens;
+    console.log(
+      `review model=${MODEL} status=${result.status} structured=${structured} image=${Boolean(image)} finish=${finish || '-'} tokens=${usage || '-'} ms=${Date.now() - started}`
+    );
+
+    if (result.status === 401 || result.status === 403) {
+      return fail(502, 'The model access key was rejected. Check MODEL_ACCESS_KEY.', upstreamDetail(result));
+    }
+    if (result.status === 404) {
+      return fail(502, `Model "${MODEL}" was not found. Check the MODEL setting against GET /v1/models.`, upstreamDetail(result));
+    }
+    if (result.status === 429) {
+      return fail(429, 'The model is rate limited right now. Try again in a minute.', upstreamDetail(result));
+    }
+    if (result.status < 200 || result.status >= 300) {
+      console.error('inference error body:', String(result.raw).slice(0, 500));
+      return fail(
+        502,
+        image
+          ? 'The model rejected this request. If it does not accept images, set MODEL to a vision model, or describe the setup in text instead.'
+          : 'The model could not process this request.',
+        `HTTP ${result.status}: ${upstreamDetail(result)}`
+      );
+    }
+
+    // Prefer the final answer. Some reasoning models put output in a separate field.
+    const msg = (choice && choice.message) || {};
+    let content = messageText(result.json);
+    if (!content.trim()) content = String(msg.reasoning_content || msg.reasoning || '');
+    const parsed = extractJson(content);
+    if (!parsed) {
+      console.error('unparseable model output (finish=%s, len=%d): %s', finish, content.length, content.slice(0, 300));
+      if (finish === 'length') {
+        return fail(502, 'The model ran out of output space before it finished. Try a simpler diagram or a shorter description.', 'finish_reason=length');
+      }
+      return fail(502, 'The model returned an answer in an unexpected format. Try again.', content ? `Started with: ${content.slice(0, 80).replace(/\s+/g, ' ')}` : 'Empty answer');
+    }
+
+    const review = normalizeReview(parsed);
+    if (!review.findings.length && !review.summary) {
+      return fail(502, 'The model returned an empty review. Add more detail and try again.');
+    }
+    return { ok: true, review, model: MODEL, tookMs: Date.now() - started };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      return fail(504, 'The model took too long. Try a smaller diagram or a shorter description.');
+    }
+    console.error('review failed:', err && err.message);
+    return fail(502, 'Could not reach the model. Try again in a moment.', String(err && err.message).slice(0, 160));
+  }
+}
+
 async function handleReview(req, res) {
   const ip = clientIp(req);
   if (count(`review:${ip}`, REVIEW_WINDOW) >= REVIEW_MAX_PER_IP || count('review:all', 60 * 60 * 1000) >= REVIEW_MAX_GLOBAL_HOURLY) {
@@ -278,78 +417,39 @@ async function handleReview(req, res) {
   if (!MODEL_ACCESS_KEY) {
     return sendJson(res, 503, { error: 'The model access key is not configured on the server.' });
   }
+  if (runningJobs() >= MAX_RUNNING_JOBS) {
+    return sendJson(res, 429, { error: 'The reviewer is busy with other reviews. Try again in a minute.' }, { 'Retry-After': '60' });
+  }
 
   hit(`review:${ip}`, REVIEW_WINDOW);
   hit('review:all', 60 * 60 * 1000);
 
-  const userText = description
-    ? `Customer's description of the setup:\n${description}${image ? '\n\nA diagram is attached. Use it together with the description.' : ''}`
-    : 'No written description was provided. Base the review on the attached diagram.';
-
-  const userContent = image
-    ? [
-        { type: 'text', text: userText },
-        { type: 'image_url', image_url: { url: image } },
-      ]
-    : userText;
-
-  const base = {
-    model: MODEL,
-    temperature: 0.2,
-    max_tokens: 6000,
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: userContent },
-    ],
-  };
-
-  const started = Date.now();
-  try {
-    // First try strict structured output. Some models reject it, so fall back to prompt-only JSON.
-    let result = await callInference({
-      ...base,
-      response_format: { type: 'json_schema', json_schema: { name: 'architecture_review', strict: true, schema: REVIEW_SCHEMA } },
+  const id = crypto.randomBytes(16).toString('hex');
+  const job = { id, status: 'running', createdAt: Date.now(), result: null };
+  jobs.set(id, job);
+  performReview({ description, image })
+    .then((r) => {
+      job.result = r;
+      job.status = r.ok ? 'done' : 'error';
+    })
+    .catch((e) => {
+      console.error('job crashed:', e && e.stack);
+      job.result = fail(500, 'Something went wrong while reviewing. Try again.');
+      job.status = 'error';
     });
-    let usedStructured = true;
-    if (result.status === 400 || result.status === 422) {
-      usedStructured = false;
-      result = await callInference(base);
-    }
 
-    console.log(`review ip=${ip} model=${MODEL} status=${result.status} structured=${usedStructured} image=${Boolean(image)} ms=${Date.now() - started}`);
+  return sendJson(res, 202, { jobId: id });
+}
 
-    if (result.status === 401 || result.status === 403) {
-      return sendJson(res, 502, { error: 'The model access key was rejected. Check MODEL_ACCESS_KEY.' });
-    }
-    if (result.status === 404) {
-      return sendJson(res, 502, { error: `Model "${MODEL}" was not found. Check the MODEL setting against GET /v1/models.` });
-    }
-    if (result.status === 429) {
-      return sendJson(res, 429, { error: 'The model is rate limited right now. Try again in a minute.' }, { 'Retry-After': '60' });
-    }
-    if (result.status < 200 || result.status >= 300) {
-      console.error('inference error body:', String(result.raw).slice(0, 500));
-      return sendJson(res, 502, { error: 'The model could not process this request. If you attached a diagram, try a clearer or smaller one.' });
-    }
-
-    const parsed = extractJson(messageText(result.json));
-    if (!parsed) {
-      console.error('unparseable model output:', messageText(result.json).slice(0, 300));
-      return sendJson(res, 502, { error: 'The model returned an answer in an unexpected format. Try again.' });
-    }
-
-    const review = normalizeReview(parsed);
-    if (!review.findings.length && !review.summary) {
-      return sendJson(res, 502, { error: 'The model returned an empty review. Add more detail and try again.' });
-    }
-    return sendJson(res, 200, { review, model: MODEL, tookMs: Date.now() - started });
-  } catch (err) {
-    if (err && err.name === 'AbortError') {
-      return sendJson(res, 504, { error: 'The model took too long. Try a smaller diagram or a shorter description.' });
-    }
-    console.error('review failed:', err && err.message);
-    return sendJson(res, 502, { error: 'Could not reach the model. Try again in a moment.' });
+function handleReviewStatus(res, id) {
+  const job = jobs.get(id);
+  if (!job) return sendJson(res, 404, { error: 'This review expired. Run it again.' });
+  if (job.status === 'running') return sendJson(res, 200, { status: 'running', elapsedMs: Date.now() - job.createdAt });
+  if (job.status === 'done') {
+    const { review, model, tookMs } = job.result;
+    return sendJson(res, 200, { status: 'done', review, model, tookMs });
   }
+  return sendJson(res, 200, { status: 'error', error: job.result.error, detail: job.result.detail || '' });
 }
 
 async function handleLogin(req, res) {
@@ -406,9 +506,14 @@ const server = http.createServer(async (req, res) => {
       return serveFile(res, path.join(PUBLIC_DIR, 'index.html'), 'text/html; charset=utf-8', 'no-store');
     }
     if (pathname === '/api/config' && method === 'GET') {
-      return sendJson(res, 200, { model: MODEL, keyConfigured: Boolean(MODEL_ACCESS_KEY) });
+      return sendJson(res, 200, { model: MODEL, keyConfigured: Boolean(MODEL_ACCESS_KEY), check: await checkModel() });
     }
     if (pathname === '/api/review' && method === 'POST') return handleReview(req, res);
+    if (method === 'GET' && pathname.startsWith('/api/review/')) {
+      const id = pathname.slice('/api/review/'.length);
+      if (!/^[a-f0-9]{32}$/.test(id)) return sendJson(res, 404, { error: 'Not found.' });
+      return handleReviewStatus(res, id);
+    }
 
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('Not found');
