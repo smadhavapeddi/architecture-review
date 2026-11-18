@@ -48,7 +48,15 @@ fetch('/api/config')
   .then((cfg) => {
     if (!cfg) return;
     $('modelNote').textContent = `Model: ${cfg.model}`;
-    if (!cfg.keyConfigured) setStatus('The model access key is not set on the server yet, so reviews will fail.', true);
+    const st = cfg.check && cfg.check.state;
+    if (!cfg.keyConfigured || st === 'nokey') {
+      setStatus('The model access key is not set on the server yet, so reviews will fail.', true);
+    } else if (st === 'badkey') {
+      setStatus('The model access key was rejected. Check MODEL_ACCESS_KEY in the app settings.', true);
+    } else if (st === 'missing') {
+      const hints = cfg.check.hints && cfg.check.hints.length ? ` Models your key can use include: ${cfg.check.hints.join(', ')}.` : '';
+      setStatus(`The model "${cfg.model}" is not available for your key. Set MODEL in the app settings.${hints}`, true);
+    }
   })
   .catch(() => {});
 
@@ -62,7 +70,7 @@ async function toDataUrl(file) {
   if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) throw new Error('Use a PNG, JPEG, WebP, or GIF image.');
   if (file.size > 20 * 1024 * 1024) throw new Error('That image is over 20 MB. Use a smaller one.');
   const bmp = await createImageBitmap(file);
-  const maxSide = 1800;
+  const maxSide = 1600;
   const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(bmp.width * scale));
@@ -142,6 +150,38 @@ $('examples').addEventListener('click', (e) => {
 });
 
 // ---------- Run review ----------
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+// Reviews run as background jobs on the server. Poll until done so no single request stays open long.
+async function pollJob(jobId) {
+  const deadline = Date.now() + 6 * 60 * 1000;
+  let netFails = 0;
+  while (Date.now() < deadline) {
+    await sleep(2500);
+    let r;
+    try {
+      r = await fetch(`/api/review/${jobId}`, { cache: 'no-store' });
+      netFails = 0;
+    } catch (_) {
+      if (++netFails >= 5) throw new Error('Lost connection to the server while waiting for the review. Try again.');
+      continue;
+    }
+    if (r.status === 401) {
+      location.href = '/login';
+      throw new Error('Your session has ended. Sign in again.');
+    }
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'The review could not be retrieved. Try again.');
+    if (data.status === 'done') return data;
+    if (data.status === 'error') {
+      const err = new Error(data.error || 'The review failed. Try again.');
+      err.detail = data.detail;
+      throw err;
+    }
+  }
+  throw new Error('The review is taking too long. Try a smaller diagram or a shorter description.');
+}
+
 runBtn.addEventListener('click', async () => {
   const description = descEl.value.trim();
   if (!description && !imageDataUrl) {
@@ -164,14 +204,16 @@ runBtn.addEventListener('click', async () => {
       location.href = '/login';
       return;
     }
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(data.error || 'The review failed. Try again.');
+    const started = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(started.error || 'The review could not start. Try again.');
+
+    const data = await pollJob(started.jobId);
     lastReview = data;
     render(data);
     setStatus('');
     if (window.innerWidth < 960) outEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (err) {
-    setStatus(err.message || 'The review failed. Try again.', true);
+    setStatus((err.message || 'The review failed. Try again.') + (err.detail ? ` Details: ${err.detail}` : ''), true);
   } finally {
     clearInterval(timer);
     runBtn.disabled = false;
