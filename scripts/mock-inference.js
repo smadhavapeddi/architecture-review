@@ -35,20 +35,35 @@ const review = {
   questions_for_customer: ["What is the acceptable downtime and data loss for this site?"],
   next_steps: ["Move the database to Managed MySQL first", "Add a second web Droplet and a load balancer"]
 };
+// Failure modes for testing (set as environment variables):
+//   MOCK_SLOW=ms        delay before answering
+//   MOCK_LENGTH=1       reasoning model that runs out of tokens: empty content, finish_reason "length"
+//   MOCK_NO_VISION=1    reject image input with a 400 and a message
+//   MOCK_NO_MODEL=1     /v1/models does not list glm-5.3-flash
+const SLOW = Number(process.env.MOCK_SLOW || 1200);
+const KEY = process.env.MOCK_KEY || 'test-key';
 http.createServer((req, res) => {
   let body = '';
   req.on('data', c => body += c);
   req.on('end', () => {
-    if (req.headers.authorization !== 'Bearer ' + (process.env.MOCK_KEY || 'test-key')) { res.writeHead(401, {'content-type':'application/json'}); return res.end('{"error":"bad key"}'); }
+    const json = (code, obj) => { res.writeHead(code, {'content-type':'application/json'}); res.end(JSON.stringify(obj)); };
+    if (req.headers.authorization !== 'Bearer ' + KEY) return json(401, { error: 'bad key' });
+    if (req.method === 'GET' && req.url.endsWith('/models')) {
+      const ids = ['deepseek-v4.1-flash', 'kimi-k3', 'qwen3.8-max'].concat(process.env.MOCK_NO_MODEL === '1' ? [] : ['glm-5.3-flash']);
+      return json(200, { object: 'list', data: ids.map(id => ({ id, object: 'model' })) });
+    }
     const j = JSON.parse(body || '{}');
     const hasImage = Array.isArray(j.messages?.[1]?.content);
     console.log(`mock: model=${j.model} schema=${!!j.response_format} image=${hasImage} max_tokens=${j.max_tokens}`);
-    if (REJECT_SCHEMA && j.response_format) { res.writeHead(400, {'content-type':'application/json'}); return res.end('{"error":"response_format not supported"}'); }
-    let content = JSON.stringify(review);
-    if (FENCED) content = "Here is the review:\n```json\n" + content + "\n```";
+    if (process.env.MOCK_NO_VISION === '1' && hasImage) return json(400, { error: { message: 'This model does not support image input', type: 'invalid_request_error' } });
+    if (REJECT_SCHEMA && j.response_format) return json(400, { error: 'response_format not supported' });
     setTimeout(() => {
-      res.writeHead(200, {'content-type':'application/json'});
-      res.end(JSON.stringify({ choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }] }));
-    }, 1200);
+      if (process.env.MOCK_LENGTH === '1') {
+        return json(200, { choices: [{ index: 0, finish_reason: 'length', message: { role: 'assistant', content: '', reasoning_content: 'Let me think about the diagram step by step...' } }], usage: { total_tokens: 9100 } });
+      }
+      let content = JSON.stringify(review);
+      if (FENCED) content = "Here is the review:\n```json\n" + content + "\n```";
+      json(200, { choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content } }], usage: { total_tokens: 4200 } });
+    }, SLOW);
   });
 }).listen(9999, () => console.log('mock inference on 9999'));
